@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Smart Ride Assistant</string>
+    <string name="notif_channel_name">Live ride analysis</string>
+    <string name="notif_title">Smart Ride Assistant is analysing your screen</string>
+    <string name="notif_text">Screen frames are processed on this device only. Tap Stop to end.</string>
+    <string name="notif_stop">Stop</string>
+</resources>

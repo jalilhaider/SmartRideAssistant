@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Simple original mark: a route line ending in a pin. -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M30,74 C30,56 48,60 54,48" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M64,28 C55,28 49,35 49,43 C49,53 64,68 64,68 C64,68 79,53 79,43 C79,35 73,28 64,28 Z M64,48 C61.2,48 59,45.8 59,43 C59,40.2 61.2,38 64,38 C66.8,38 69,40.2 69,43 C69,45.8 66.8,48 64,48 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,74 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+</vector>
