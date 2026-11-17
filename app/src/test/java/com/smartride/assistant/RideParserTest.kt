@@ -19,20 +19,37 @@ class RideParserTest {
     private fun line(text: String, left: Int, top: Int, conf: Float = 0.95f, w: Int = 300) =
         OcrLine(text, left, top, left + w, top + 40, conf)
 
-    /** Format A: three stacked cards, fare at the top-right of each card. */
-    private fun listScreen(): List<OcrLine> = buildList {
-        // card 1
-        add(line("Rs.434", 800, 300, w = 200)); add(line("4.9", 60, 300, w = 60))
-        add(line("Mall Road", 60, 360)); add(line("1.2 km", 800, 360, w = 160))
-        add(line("Faiz Town", 60, 410)); add(line("3.1 km", 800, 410, w = 160))
-        // card 2
-        add(line("Rs.243", 800, 620, w = 200)); add(line("4.7", 60, 620, w = 60))
-        add(line("Stylo Shoe", 60, 680)); add(line("800 m", 800, 680, w = 160))
-        add(line("Bahawalpur Road", 60, 730)); add(line("2.8 km", 800, 730, w = 160))
-        // card 3
-        add(line("Rs.573", 800, 940, w = 200)); add(line("5.0", 60, 940, w = 60))
-        add(line("Akbar Rd", 60, 1000)); add(line("2.0 km", 800, 1000, w = 160))
-        add(line("Faiz Town", 60, 1050)); add(line("6.4 km", 800, 1050, w = 160))
+    /**
+     * Format A laid out like the real inDrive list screen (positions taken from a 308 px wide screenshot):
+     * big fare, pickup + distance, destination + distance, addresses wrapping onto a 2nd truncated line,
+     * then a passenger row "Name * rating (count)" with "N min." on the right.
+     */
+    private fun listScreen(): List<OcrLine> {
+        fun l(t: String, x: Int, cy: Int, w: Int = 180, h: Int = 18, c: Float = 0.95f) = OcrLine(t, x, cy - h / 2, x + w, cy + h / 2, c)
+        return listOf(
+            l("Offline", 120, 60), l("Ride requests", 40, 662), l("Performance", 200, 662),
+            // card 1
+            l("Rs434", 18, 122, 80, 26),
+            l("Stylo shoe (Mall Road,", 44, 155), l("4.6 km", 241, 155, 50),
+            l("Multan Cantt Commercial ...", 44, 173),
+            l("Faiz Town (Multan)", 44, 195), l("8.5 km", 241, 195, 50),
+            l("Imran * 4.62 (103)", 44, 222, 140), l("1 min.", 252, 222, 40),
+            // card 2
+            l("Rs243", 18, 277, 80, 26),
+            l("Shaheen St (Mohalla Kotla", 44, 320), l("5.3 km", 241, 320, 50),
+            l("Tollay Khan)", 44, 338),
+            l("Hotel Luxury Express (Tariq", 44, 352), l("2.7 km", 241, 352, 50),
+            l("Road, beside Hotel One, ...", 44, 370),
+            l("Nisar * 4.91 (43)", 44, 397, 140), l("2 min.", 252, 397, 40),
+            // card 3 (with a payment tag above the fare)
+            l("JazzCash", 14, 443, 60),
+            l("Rs573", 18, 476, 80, 26),
+            l("Akbar Rd (Basti Sadu", 44, 512), l("6.1 km", 241, 512, 50),
+            l("Hassan)", 44, 530),
+            l("Bahawalpur Road", 44, 552), l("16.6 km", 235, 552, 55),
+            l("(Raitarwala Khandarwala, ...", 44, 570),
+            l("Naina * 3.89 (126)", 44, 596, 140), l("2 min.", 252, 596, 40),
+        )
     }
 
     /** Format B: a single detail screen with an "Accept" button repeating the fare. */
@@ -54,17 +71,34 @@ class RideParserTest {
         val offers = RideParser.parse(listScreen())
         assertEquals(3, offers.size)
         assertEquals(listOf(434, 243, 573), offers.map { it.fare })
-        assertEquals("Mall Road", offers[0].pickup); assertEquals("Faiz Town", offers[0].destination)
-        assertEquals("Stylo Shoe", offers[1].pickup); assertEquals("Bahawalpur Road", offers[1].destination)
-        assertEquals("Akbar Rd", offers[2].pickup); assertEquals("Faiz Town", offers[2].destination)
+        assertEquals("Stylo shoe (Mall Road, Multan Cantt Commercial)", offers[0].pickup)
+        assertEquals("Faiz Town (Multan)", offers[0].destination)
+        assertEquals("Shaheen St (Mohalla Kotla Tollay Khan)", offers[1].pickup)
+        assertEquals("Hotel Luxury Express (Tariq Road, beside Hotel One)", offers[1].destination)
+        assertEquals("Akbar Rd (Basti Sadu Hassan)", offers[2].pickup)
+        assertEquals("Bahawalpur Road (Raitarwala Khandarwala)", offers[2].destination)
     }
 
-    @Test fun fareStaysAssociatedWithItsOwnAddresses() {
-        val o = RideParser.parse(listScreen()).first { it.fare == 243 }
-        assertEquals("Stylo Shoe", o.pickup)
-        assertEquals(0.8, o.pickupDistanceKm!!, 1e-9)   // 800 m -> km
-        assertEquals(2.8, o.tripDistanceKm!!, 1e-9)
-        assertEquals(4.7, o.rating!!, 1e-9)
+    @Test fun passengerRowIsNeverTakenAsAddress() {
+        for (o in RideParser.parse(listScreen())) {
+            for (text in listOfNotNull(o.pickup, o.destination)) {
+                assertTrue(text, !text.contains("Imran") && !text.contains("Nisar") && !text.contains("Naina"))
+                assertTrue(text, !text.contains("Ride requests") && !text.contains("Performance") && !text.contains("JazzCash"))
+            }
+        }
+    }
+
+    @Test fun listCardDistancesRatingAndEtaAreAssignedCorrectly() {
+        val offers = RideParser.parse(listScreen())
+        assertEquals(4.6, offers[0].pickupDistanceKm!!, 1e-9)
+        assertEquals(8.5, offers[0].tripDistanceKm!!, 1e-9)
+        assertEquals(1, offers[0].pickupEtaMin)
+        assertNull(offers[0].tripDurationMin)
+        assertEquals(4.62, offers[0].rating!!, 1e-9)
+        assertEquals(5.3, offers[1].pickupDistanceKm!!, 1e-9)
+        assertEquals(2.7, offers[1].tripDistanceKm!!, 1e-9)
+        assertEquals(6.1, offers[2].pickupDistanceKm!!, 1e-9)
+        assertEquals(16.6, offers[2].tripDistanceKm!!, 1e-9)
     }
 
     @Test fun detailScreenYieldsOneOfferAndIgnoresAcceptButton() {

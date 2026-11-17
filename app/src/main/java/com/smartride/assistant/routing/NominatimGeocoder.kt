@@ -43,17 +43,24 @@ object NominatimParser {
         return GeocodeResult(top.point, top.displayName, confidence)
     }
 
-    /** "Tindni Rd (Waqas Town)" -> several query variants, most specific first. */
+    /**
+     * "Tindni Rd (Waqas Town)" -> several query variants, most specific first. Business names are often missing from
+     * OpenStreetMap, so the road/area inside the brackets is tried as a fallback (it is still bounded to the driver's area).
+     */
     fun queryVariants(raw: String): List<String> {
         val t = raw.trim()
         val paren = Regex("""\(([^)]*)\)""").find(t)
         val outside = t.replace(Regex("""\([^)]*\)"""), " ").replace(Regex("""\s+"""), " ").trim()
         val inside = paren?.groupValues?.get(1)?.trim().orEmpty()
+        val skip = Regex("""(?i)^(beside|near|opposite|behind|infront|in front|next to)\b""")
+        val insideParts = inside.split(',').map { it.trim() }.filter { it.isNotEmpty() && !skip.containsMatchIn(it) }
         return buildList {
             add(t)
             if (inside.isNotEmpty() && outside.isNotEmpty()) add("$outside, $inside")
-            if (outside.isNotEmpty() && outside != t) add(outside)
+            if (insideParts.isNotEmpty()) add(insideParts.joinToString(", "))
             if (inside.isNotEmpty()) add(inside)
+            if (insideParts.size > 1) add(insideParts.first())
+            if (outside.isNotEmpty() && outside != t) add(outside)
         }.distinct()
     }
 }

@@ -95,7 +95,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val bmp: Bitmap = ImageDecoder.decodeBitmap(
                     ImageDecoder.createSource(getApplication<Application>().contentResolver, uri),
                 ) { decoder, _, _ -> decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE }
-                val out = c.coordinator.processBitmap(bmp, speak = true)
+                val out = c.coordinator.processBitmap(bmp, speak = true, liveMode = false)
                 bmp.recycle()
                 _message.value = if (!out.relevant) "No ride-offer screen recognised in that image (OCR took ${out.ocrMs} ms)."
                 else "Found ${out.analyses.size} offer(s) in ${out.ocrMs} ms OCR. See the Results tab."

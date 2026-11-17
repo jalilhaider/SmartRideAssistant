@@ -4,17 +4,18 @@ import com.smartride.assistant.data.OcrLine
 import com.smartride.assistant.data.RideOffer
 import com.smartride.assistant.data.ScreenFormat
 import kotlin.math.abs
+import kotlin.math.max
 
 /**
  * Turns OCR lines into structured ride offers. Pure Kotlin (no Android types) so it can be unit tested.
  *
  * Strategy
- *  1. A fare ("Rs.434", "Rs 434", "PKR 434") is the anchor of one offer.
- *  2. Lines are split into per-offer regions at the largest vertical whitespace gap between two
- *     consecutive fare anchors. This works whether the fare sits at the top or the middle of a card.
- *  3. Inside a region, distances/times/rating are pulled out with regexes; the remaining text lines are
- *     address candidates. First candidate = pickup, second = destination (top-to-bottom reading order).
- *  4. Each distance/time is attached to the nearest address row, so "1.4 km" beside the pickup stays with the pickup.
+ *  1. A fare ("Rs434", "Rs.434", "PKR 434") is the anchor of one offer.
+ *  2. Lines are split into per-offer regions at the largest vertical whitespace gap between two consecutive fares.
+ *  3. LIST cards (observed inDrive layout): the first two "km" mentions are the pickup distance and the trip distance,
+ *     each printed beside the FIRST line of its address. Address text that wraps onto following lines belongs to the
+ *     same block. The passenger row ("Name * 4.62 (103)" + "1 min.") ends the card and is excluded.
+ *  4. DETAIL screens: address lines are read top to bottom (pickup, destination) and numbers are attached to the nearest address row.
  *
  * Nothing is invented: anything not read stays null and the offer is later classified NEEDS REVIEW.
  */
@@ -23,12 +24,16 @@ object RideParser {
     private val FARE = Regex("""(?i)(?:\brs|\bpkr|₨)\s*[.:]?\s*(\d[\d,]{1,5})(?!\d)""")
     private val DIST = Regex("""(?i)(\d+(?:[.,]\d+)?)\s*(km|kms|m)\b""")
     private val TIME = Regex("""(?i)(\d{1,3})\s*(?:min|mins|minute|minutes)\b""")
-    private val RATING_ONLY = Regex("""^[\s★⭐*(]*([1-5][.,]\d{1,2})[\s)]*$""")
+    private val RATING_ONLY = Regex("""^[\s★☆⭐*(]*([1-5][.,]\d{1,2})[\s)]*$""")
+    private val RATING_PAREN = Regex("""(?<![\d.])([1-5][.,]\d{1,2})\s*\(\s*\d{1,5}\s*\)""")
+    private val STAR = Regex("""[★☆⭐]""")
+    private val ELLIPSIS_END = Regex("""[\s,.]*(?:\.{2,}|…)[\s,.]*$""")
     private val BUTTON_WORDS = Regex("""(?i)\b(accept|offer|bid|request|decline|send)\b""")
     private val NOISE_EXACT = setOf(
         "ride", "rides", "pickup", "pick up", "destination", "drop off", "dropoff", "away", "min", "km", "m",
-        "cash", "online", "new", "nearby", "filter", "decline", "accept", "offer", "orders", "order", "from", "to",
-        "city", "intercity", "freight", "courier", "search", "searching", "rs", "pkr",
+        "cash", "online", "offline", "new", "nearby", "filter", "decline", "accept", "offer", "orders", "order", "from", "to",
+        "city", "intercity", "freight", "courier", "search", "searching", "rs", "pkr", "jazzcash", "easypaisa",
+        "ride requests", "performance", "requests",
     )
     private val NOISE_CONTAINS = listOf(
         "offer your fare", "your fare", "accept", "decline", "searching for", "no orders", "go online",
@@ -100,18 +105,34 @@ object RideParser {
     // ---- one offer ----------------------------------------------------------------------------
 
     private data class Mention<T>(val value: T, val y: Int)
+    private data class Frag(val raw: String, val y: Int, val conf: Float)
     private data class Addr(val text: String, val y: Int, val conf: Float)
 
     private fun parseRegion(region: List<OcrLine>, anchor: FareAnchor, format: ScreenFormat): RideOffer? {
+        val ordered = region.sortedWith(compareBy({ it.top }, { it.left })).filter { it !== anchor.line }
+        val heights = ordered.map { it.height }.filter { it > 0 }.sorted()
+        val lineH = if (heights.isEmpty()) 20 else heights[heights.size / 2]
+        val tol = max(6, (lineH * 0.7).toInt())
+
         val dists = ArrayList<Mention<Double>>()
         val times = ArrayList<Mention<Int>>()
-        val addrs = ArrayList<Addr>()
+        val frags = ArrayList<Frag>()
+        val passengerYs = ArrayList<Int>()
         var rating: Double? = null
 
-        for (line in region.sortedWith(compareBy({ it.top }, { it.left }))) {
-            if (line === anchor.line) continue
+        for (line in ordered) {
             var t = line.text
             FARE.find(t)?.let { t = t.replaceRange(it.range, " ") } // other fare-like text (button copies)
+
+            // passenger row: "Imran * 4.62 (103)" - never an address
+            val rp = RATING_PAREN.find(line.text)
+            if (rp != null || STAR.containsMatchIn(line.text)) {
+                rating = (rp?.groupValues?.get(1) ?: Regex("""[1-5][.,]\d{1,2}""").find(line.text)?.value)
+                    ?.replace(',', '.')?.toDoubleOrNull() ?: rating
+                passengerYs.add(line.centerY)
+                continue
+            }
+
             for (m in DIST.findAll(line.text)) {
                 val n = m.groupValues[1].replace(',', '.').toDoubleOrNull() ?: continue
                 val km = if (m.groupValues[2].lowercase().startsWith("k")) n else n / 1000.0
@@ -127,11 +148,80 @@ object RideParser {
                 rating = ratingMatch.groupValues[1].replace(',', '.').toDoubleOrNull()
                 continue
             }
-            val cleaned = cleanAddress(t)
-            if (cleaned != null) addrs.add(Addr(cleaned, line.centerY, line.confidence))
+            if (t.isNotBlank()) frags.add(Frag(t, line.centerY, line.confidence))
         }
 
-        // choose pickup/destination among address candidates
+        val parsed = if (format == ScreenFormat.LIST && dists.isNotEmpty()) {
+            parseListBlocks(frags, dists, times, passengerYs, lineH, tol)
+        } else {
+            parseByRows(frags, dists, times)
+        }
+        val (pickup, dest) = parsed.addresses
+        val used = listOfNotNull(pickup?.conf, dest?.conf, anchor.line.confidence)
+        var conf = if (used.isEmpty()) 0f else used.average().toFloat()
+        if (pickup == null || dest == null) conf *= 0.5f
+        if (parsed.ambiguous) conf *= 0.8f
+
+        return RideOffer(
+            fare = anchor.value,
+            pickup = pickup?.text,
+            destination = dest?.text,
+            pickupDistanceKm = parsed.pickupKm,
+            pickupEtaMin = parsed.pickupMin,
+            tripDistanceKm = parsed.tripKm,
+            tripDurationMin = parsed.tripMin,
+            rating = rating,
+            ocrConfidence = conf,
+            format = format,
+        )
+    }
+
+    private class Parsed(
+        val addresses: Pair<Addr?, Addr?>,
+        val pickupKm: Double?, val tripKm: Double?,
+        val pickupMin: Int?, val tripMin: Int?,
+        val ambiguous: Boolean = false,
+    )
+
+    /** inDrive list card: [distance beside first address line] ... wrapped lines ... [passenger row]. */
+    private fun parseListBlocks(
+        frags: List<Frag>, dists: List<Mention<Double>>, times: List<Mention<Int>>,
+        passengerYs: List<Int>, lineH: Int, tol: Int,
+    ): Parsed {
+        val ds = dists.sortedBy { it.y }.take(2)
+        val rowYs = passengerYs + times.map { it.y }
+        // the passenger row ("Name * 4.62 (103)   1 min.") closes the card
+        val cut = rowYs.filter { it > ds.first().y }.minOrNull()
+        val limit = if (cut != null) cut - tol else Int.MAX_VALUE
+
+        fun block(k: Int): Addr? {
+            val start = ds[k].y - tol
+            val end = minOf(if (k + 1 < ds.size) ds[k + 1].y - tol else Int.MAX_VALUE, limit)
+            val inBlock = frags.filter { it.y in start until end }.sortedBy { it.y }
+            val kept = ArrayList<Frag>()
+            for (f in inBlock) {
+                if (kept.isNotEmpty() && (f.y - kept.last().y > 2 * lineH || kept.size >= 3)) break
+                val c = cleanFragment(f.raw) ?: continue
+                kept.add(Frag(c, f.y, f.conf))
+            }
+            if (kept.isEmpty()) return null
+            val text = finalizeAddress(kept.joinToString(" ") { it.raw })
+            if (text.count { it.isLetter() } < 3) return null
+            return Addr(text, kept.first().y, kept.map { it.conf }.average().toFloat())
+        }
+
+        val pickup = block(0)
+        val dest = if (ds.size > 1) block(1) else null
+        return Parsed(
+            pickup to dest,
+            pickupKm = ds[0].value, tripKm = ds.getOrNull(1)?.value,
+            pickupMin = times.firstOrNull()?.value, tripMin = null,
+        )
+    }
+
+    /** Detail screens / fallback: one address per text line, numbers attach to the nearest address row. */
+    private fun parseByRows(frags: List<Frag>, dists: List<Mention<Double>>, times: List<Mention<Int>>): Parsed {
+        val addrs = frags.mapNotNull { f -> cleanAddress(f.raw)?.let { Addr(it, f.y, f.conf) } }
         var ambiguous = false
         val pair: Pair<Addr?, Addr?> = when {
             addrs.isEmpty() -> null to null
@@ -150,7 +240,6 @@ object RideParser {
         }
         val pickup = pair.first
         val dest = pair.second
-
         var pickupKm: Double? = null; var tripKm: Double? = null
         var pickupMin: Int? = null; var tripMin: Int? = null
         if (pickup != null) {
@@ -164,29 +253,11 @@ object RideParser {
                 if (nearest(t.y) == 0) { if (pickupMin == null) pickupMin = t.value }
                 else if (tripMin == null) tripMin = t.value
             }
-            // Detail screens often print "1.4 km" and "2.8 km" on separate rows from the addresses.
             // If everything fell on one side but two values exist, fall back to reading order.
             if (dest != null && dists.size >= 2 && tripKm == null) { pickupKm = dists[0].value; tripKm = dists[1].value }
             if (dest != null && times.size >= 2 && tripMin == null) { pickupMin = times[0].value; tripMin = times[1].value }
         }
-
-        val used = listOfNotNull(pickup?.conf, dest?.conf, anchor.line.confidence)
-        var conf = if (used.isEmpty()) 0f else used.average().toFloat()
-        if (pickup == null || dest == null) conf *= 0.5f
-        if (ambiguous) conf *= 0.8f
-
-        return RideOffer(
-            fare = anchor.value,
-            pickup = pickup?.text,
-            destination = dest?.text,
-            pickupDistanceKm = pickupKm,
-            pickupEtaMin = pickupMin,
-            tripDistanceKm = tripKm,
-            tripDurationMin = tripMin,
-            rating = rating,
-            ocrConfidence = conf,
-            format = format,
-        )
+        return Parsed(pair, pickupKm, tripKm, pickupMin, tripMin, ambiguous)
     }
 
     private fun attachedCount(a: Addr, d: List<Mention<Double>>, t: List<Mention<Int>>): Int {
@@ -194,7 +265,31 @@ object RideParser {
         return d.count { abs(it.y - a.y) <= tol } + t.count { abs(it.y - a.y) <= tol }
     }
 
-    /** Returns a cleaned address candidate or null if the text is UI noise / has too few letters. */
+    // ---- text cleaning ------------------------------------------------------------------------
+
+    /** One OCR fragment of a (possibly wrapped) address: keeps commas and parentheses for the later join. */
+    private fun cleanFragment(raw: String): String? {
+        val s = raw.replace(Regex("""[•·|→>»«•●○]+"""), " ")
+            .replace(Regex("""\s+"""), " ").trim()
+        if (s.count { it.isLetter() } < 2) return null
+        val low = s.lowercase().trim(' ', '.', ',', ':')
+        if (low in NOISE_EXACT) return null
+        if (NOISE_CONTAINS.any { low.contains(it) }) return null
+        return s
+    }
+
+    /** Joins wrapped fragments into one clean address: drops the "..." truncation and closes a dangling "(". */
+    internal fun finalizeAddress(joined: String): String {
+        var s = joined.replace(Regex("""\s+"""), " ").trim()
+        s = ELLIPSIS_END.replace(s, "").trim(' ', ',', '.', '-', '–', ':', ';')
+        val open = s.count { it == '(' }
+        val close = s.count { it == ')' }
+        if (open > close) s += ")".repeat(open - close)
+        if (close > open) s = s.replace(")", "")
+        return s.replace("()", "").trim()
+    }
+
+    /** Returns a cleaned single-line address candidate or null if the text is UI noise / has too few letters. */
     internal fun cleanAddress(raw: String): String? {
         var s = raw.replace(Regex("""[•·|→>»«•●○]+"""), " ")
             .replace(Regex("""\s+"""), " ")
@@ -207,7 +302,6 @@ object RideParser {
         val low = s.lowercase()
         if (low in NOISE_EXACT) return null
         if (NOISE_CONTAINS.any { low.contains(it) }) return null
-        s = s.trim()
         return s.ifEmpty { null }
     }
 }

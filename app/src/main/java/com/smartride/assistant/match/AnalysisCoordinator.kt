@@ -46,7 +46,7 @@ class AnalysisCoordinator(
         gate.reset()
     }
 
-    suspend fun processBitmap(bitmap: Bitmap, speak: Boolean = true): FrameOutcome {
+    suspend fun processBitmap(bitmap: Bitmap, speak: Boolean = true, liveMode: Boolean = true): FrameOutcome {
         val t0 = SystemClock.elapsedRealtime()
         val lines = ocr.recognise(bitmap)
         val ocrMs = SystemClock.elapsedRealtime() - t0
@@ -55,7 +55,7 @@ class AnalysisCoordinator(
         }
         val offers = RideParser.parse(lines)
         val settings = settingsRepo.current()
-        val analyses = offers.map { analyseCached(it, settings, speak) }
+        val analyses = offers.map { analyseCached(it, settings, speak, liveMode) }
         val newCount = synchronized(cache) { offers.count { seenKeys.add(it.key) } }
         MonitorBus.results.value = analyses
         analyses.firstOrNull { it.classification == Classification.FAVOURABLE }?.let { MonitorBus.lastRide.value = it }
@@ -74,14 +74,14 @@ class AnalysisCoordinator(
         return a
     }
 
-    private suspend fun analyseCached(offer: RideOffer, settings: AppSettings, speak: Boolean): RideAnalysis {
+    private suspend fun analyseCached(offer: RideOffer, settings: AppSettings, speak: Boolean, liveMode: Boolean): RideAnalysis {
         val now = SystemClock.elapsedRealtime()
         val hit = synchronized(cache) { cache[offer.key] }
         val ttl = if (hit?.analysis?.classification == Classification.NEEDS_REVIEW) REVIEW_TTL_MS else TTL_MS
         val a = if (hit != null && now - hit.atMs < ttl) {
             hit.analysis
         } else {
-            analyse(offer, settings).also {
+            analyse(offer, settings, liveMode).also {
                 synchronized(cache) { cache[offer.key] = Cached(it, now) }
                 historyRepo.record(it)
             }
@@ -90,9 +90,10 @@ class AnalysisCoordinator(
         return a
     }
 
-    private suspend fun analyse(offer: RideOffer, settings: AppSettings): RideAnalysis {
+    private suspend fun analyse(offer: RideOffer, settings: AppSettings, liveMode: Boolean = true): RideAnalysis {
         val ctx = MatchContext(
-            current = location.current(),
+            // live driving needs a fresh fix; screenshot tests accept an older one
+            current = location.current(if (liveMode) 120_000L else 900_000L),
             office = settings.officePoint,
             maxDetourKm = settings.maxDetourKm,
             minOcrConfidence = settings.minOcrConfidence,

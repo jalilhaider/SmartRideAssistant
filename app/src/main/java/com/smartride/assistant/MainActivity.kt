@@ -36,6 +36,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Asked once when the app opens so GPS works for screenshot tests too. */
+    private val startupPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        container.location.start()
+    }
+
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         container.location.start()
         // Notifications or location may be denied: monitoring still works, with the limits shown in the app.
@@ -66,6 +71,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!granted(Manifest.permission.ACCESS_FINE_LOCATION)) {
+            startupPermissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+        }
         setContent {
             SmartRideTheme {
                 AppRoot(vm, Actions(start = ::requestStart, stop = ::requestStop))
